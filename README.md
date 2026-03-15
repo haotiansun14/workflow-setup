@@ -677,6 +677,117 @@ tmux kill-session -t <session-name>
   mosh $(whoami)@<home-mac-tailscale-ip>
   ```
 
+### 8.5 SSH Troubleshooting: "Connection Refused" on Port 22
+
+After installing Tailscale on both Macs, you may get `ssh: connect to host <ip> port 22: Connection refused`. This means the SSH daemon (Remote Login) is not running on the target machine.
+
+**Fix: Enable Remote Login on Mac Mini (the machine you SSH into)**
+
+All steps below run on the **Mac Mini** (home server):
+
+```bash
+# 1. Check if SSH is enabled
+sudo systemsetup -getremotelogin
+# If "Remote Login: Off", enable it:
+
+# 2. Enable Remote Login (starts sshd)
+sudo systemsetup -setremotelogin on
+
+# 3. Verify sshd is listening on port 22
+sudo lsof -i :22
+# You should see: sshd ... *:ssh (LISTEN)
+
+# 4. If still not working, check the firewall
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
+# If enabled, allow SSH through:
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add /usr/sbin/sshd
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --unblockapp /usr/sbin/sshd
+```
+
+You can also enable it via **System Settings → General → Sharing → Remote Login** (toggle ON).
+
+**Test from MacBook (your portable machine):**
+
+```bash
+# Get Mac Mini's Tailscale IP (run on Mac Mini):
+tailscale ip -4
+
+# Then from MacBook:
+ssh $(whoami)@<mac-mini-tailscale-ip>
+```
+
+### 8.6 Passwordless SSH with Key Authentication
+
+Generate a key pair on the **MacBook** (client) and authorize it on the **Mac Mini** (server).
+
+**Step 1 — Generate SSH key (run on MacBook):**
+
+```bash
+# Generate an Ed25519 key (modern, fast, secure)
+ssh-keygen -t ed25519 -C "macbook-to-macmini"
+# Press Enter to accept default path (~/.ssh/id_ed25519)
+# Press Enter twice for no passphrase (or set one for extra security)
+```
+
+**Step 2 — Copy the public key to Mac Mini (run on MacBook):**
+
+```bash
+# Option A: ssh-copy-id (easiest — will prompt for Mac Mini password one last time)
+ssh-copy-id $(whoami)@<mac-mini-tailscale-ip>
+
+# Option B: manual copy if ssh-copy-id is not available
+cat ~/.ssh/id_ed25519.pub | ssh $(whoami)@<mac-mini-tailscale-ip> \
+  'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys'
+```
+
+**Step 3 — Verify passwordless login (run on MacBook):**
+
+```bash
+# Should connect without asking for a password
+ssh $(whoami)@<mac-mini-tailscale-ip>
+```
+
+**Step 4 — Add an SSH config alias for convenience (run on MacBook):**
+
+```bash
+cat >> ~/.ssh/config << 'EOF'
+
+Host mini
+  HostName <mac-mini-tailscale-ip>
+  User <your-username>
+  IdentityFile ~/.ssh/id_ed25519
+  # Forward CLIProxyAPI dashboard and API proxy
+  LocalForward 3000 127.0.0.1:3000
+  LocalForward 8317 127.0.0.1:8317
+EOF
+chmod 600 ~/.ssh/config
+```
+
+Now you can simply run:
+
+```bash
+ssh mini                    # passwordless, with port forwarding
+# Then: http://localhost:3000 for dashboard on MacBook
+```
+
+**Optional — Harden SSH on Mac Mini (run on Mac Mini):**
+
+Once key auth works, you can disable password login for extra security:
+
+```bash
+# Edit sshd config
+sudo nano /etc/ssh/sshd_config
+# Set these values:
+#   PasswordAuthentication no
+#   ChallengeResponseAuthentication no
+
+# Restart sshd to apply
+sudo launchctl stop com.openssh.sshd
+sudo launchctl start com.openssh.sshd
+```
+
+> **Warning**: Only disable password auth after confirming key-based login works, or you may lock yourself out.
+
 ---
 
 ## Part 9: Quick Reference
@@ -701,8 +812,9 @@ tmux attach -t work
 gemini                          # interactive mode
 echo "question" | gemini        # one-shot
 
-# Remote SSH (get home IP: tailscale ip -4)
-ssh -L 3000:127.0.0.1:3000 $(whoami)@<home-mac-tailscale-ip>
+# Remote SSH (get Mac Mini IP: tailscale ip -4)
+ssh mini                    # if ~/.ssh/config alias set up (see §8.6)
+ssh -L 3000:127.0.0.1:3000 $(whoami)@<mac-mini-tailscale-ip>
 # Then: http://localhost:3000 for dashboard
 
 # OpenClaw
