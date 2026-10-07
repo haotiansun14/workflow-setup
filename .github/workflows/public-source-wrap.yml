@@ -1,0 +1,58 @@
+name: Public source wrap
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-source-wrap.yml']
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - name: Install
+        run: |
+          python -m pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Capture
+        run: |
+          mkdir -p out
+          cat >/tmp/get.py <<'PY'
+          import asyncio,json,time,html
+          from pathlib import Path
+          from playwright.async_api import async_playwright
+          out=Path('out');records=[]
+          sources={
+          'BBox_source':'https://raw.githubusercontent.com/haotiansun14/BBox-Adapter/bea3065af2cc456ea079cb2cef7ad18859cf5667/algo/beam_search.py',
+          'PaperBench_rubric':'https://raw.githubusercontent.com/openai/frontier-evals/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/rubric.json',
+          'PaperBench_blacklist':'https://raw.githubusercontent.com/openai/frontier-evals/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/blacklist.txt'}
+          async def main():
+            async with async_playwright() as p:
+              b=await p.chromium.launch();c=await b.new_context(viewport={'width':1200,'height':1000},device_scale_factor=2)
+              c.set_default_timeout(10000)
+              for name,url in sources.items():
+                pg=await c.new_page();row={'name':name,'url':url}
+                try:
+                  resp=await pg.goto(url,wait_until='domcontentloaded',timeout=20000);row['status']=resp.status
+                  assert resp.status==200
+                  original=await pg.locator('body').inner_text();(out/(name+'.txt')).write_text(original)
+                  # Only presentation changes to the genuine source page; original text is unchanged.
+                  await pg.evaluate('''() => { for (const el of document.querySelectorAll('pre')) { el.style.whiteSpace='pre-wrap';el.style.overflowWrap='anywhere';el.style.fontSize='12px';el.style.fontFamily='monospace'; } }''')
+                  assert original==await pg.locator('body').inner_text()
+                  await asyncio.wait_for(pg.screenshot(path=str(out/(name+'.png'))),20)
+                  await asyncio.wait_for(pg.pdf(path=str(out/(name+'.pdf')),format='A4',display_header_footer=True,print_background=True,header_template='<div style="font:8px sans-serif;width:94%;margin:0 3%;overflow-wrap:anywhere">'+html.escape(pg.url)+'</div>',footer_template='<div style="font:8px sans-serif;width:94%;margin:0 3%"><span class="date"></span><span class="pageNumber" style="float:right"></span></div>',margin={'top':'0.65in','bottom':'0.4in','left':'0.35in','right':'0.35in'}),30)
+                  row['captured_utc']=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime());row['text_unchanged']=True
+                except Exception as e:row['error']=str(e)
+                records.append(row);(out/'manifest.json').write_text(json.dumps(records,indent=2));print(row,flush=True)
+                await pg.close()
+              await b.close()
+          asyncio.run(main())
+          PY
+          python /tmp/get.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: public-source-wrap
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
