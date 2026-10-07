@@ -1,0 +1,99 @@
+name: Public source capture
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-source-capture.yml']
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Install browser and document tools
+        run: |
+          python -m pip install requests beautifulsoup4 playwright pymupdf
+          python -m playwright install --with-deps chromium
+      - name: Download publisher documents and capture public pages
+        run: |
+          mkdir -p out/papers out/captures
+          cat > /tmp/capture.py <<'PY'
+          import requests, json, hashlib, time, traceback
+          from pathlib import Path
+          from urllib.parse import urljoin
+          from bs4 import BeautifulSoup
+          from playwright.sync_api import sync_playwright
+          root=Path('out'); records=[]
+          direct={
+            'BAGEL':'https://raw.githubusercontent.com/mlresearch/v235/main/assets/murty24a/murty24a.pdf',
+            'PaperBench':'https://raw.githubusercontent.com/mlresearch/v267/main/assets/starace25a/starace25a.pdf',
+            'GraphARM':'https://raw.githubusercontent.com/mlresearch/v202/main/assets/kong23b/kong23b.pdf',
+            'GraphFNP':'https://raw.githubusercontent.com/mlresearch/v238/main/assets/kong24a/kong24a.pdf',
+            'BBox_Adapter':'https://raw.githubusercontent.com/mlresearch/v235/main/assets/sun24p/sun24p.pdf',
+            'MedAdapter':'https://aclanthology.org/2024.emnlp-main.1244.pdf',
+            'CoBB':'https://aclanthology.org/2024.emnlp-main.504.pdf',
+            'RetrievalQA':'https://aclanthology.org/2024.findings-acl.415.pdf'
+          }
+          landings={
+            'ToolQA':'https://proceedings.neurips.cc/paper_files/paper/2023/hash/9cb2a7495900f8b602cb10159246a016-Abstract-Datasets_and_Benchmarks.html',
+            'AdaPlanner':'https://proceedings.neurips.cc/paper_files/paper/2023/hash/b5c8c1c117618267944b2617add0a766-Abstract.html',
+            'HYDRA':'https://proceedings.neurips.cc/paper_files/paper/2024/hash/b6b4906c1334656e97cc9968ccfca073-Abstract-Conference.html',
+            'Matryoshka':'https://proceedings.neurips.cc/paper_files/paper/2025/hash/3f055edce9cc3e90514b0716a16b37b4-Abstract-Conference.html'
+          }
+          session=requests.Session()
+          for name,url in landings.items():
+            try:
+              r=session.get(url,timeout=45); r.raise_for_status()
+              links=BeautifulSoup(r.text,'html.parser').find_all('a',href=True)
+              link=next(a for a in links if a.get_text(strip=True)=='Paper')
+              direct[name]=urljoin(url,link['href'])
+            except Exception as e: records.append({'name':name,'url':url,'error':str(e)})
+          for name,url in direct.items():
+            try:
+              r=session.get(url,timeout=90); r.raise_for_status()
+              assert r.content.startswith(b'%PDF'),str(r.headers)
+              (root/'papers'/f'{name}.pdf').write_bytes(r.content)
+              records.append({'name':name,'url':url,'final_url':r.url,'bytes':len(r.content),'sha256':hashlib.sha256(r.content).hexdigest()})
+            except Exception as e: records.append({'name':name,'url':url,'error':str(e)})
+          targets=[
+            ('D01_AdaPlanner_release','https://github.com/haotiansun14/AdaPlanner/commit/f5b9b44fd57d169eec9bdc759ec78d405d4b76c3'),
+            ('D02_BBox_release','https://github.com/haotiansun14/BBox-Adapter/commit/bea3065af2cc456ea079cb2cef7ad18859cf5667'),
+            ('D03_BBox_beam_search','https://github.com/haotiansun14/BBox-Adapter/blob/bea3065af2cc456ea079cb2cef7ad18859cf5667/algo/beam_search.py#L80-L115'),
+            ('D04_PaperBench_core','https://github.com/openai/frontier-evals/blob/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/rubric.json#L1-L40'),
+            ('D05_PaperBench_training','https://github.com/openai/frontier-evals/blob/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/rubric.json#L90-L140'),
+            ('D06_PaperBench_beams','https://github.com/openai/frontier-evals/blob/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/rubric.json#L230-L259'),
+            ('D07_PaperBench_blacklist','https://github.com/openai/frontier-evals/blob/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/blacklist.txt'),
+            ('D08_RetrievalQA','https://github.com/hyintell/RetrievalQA/blob/f26134cb167f420a657684665f597964aadabd3c/README.md#retriever'),
+            ('P01_BAGEL_record','https://proceedings.mlr.press/v235/murty24a.html'),
+            ('P02_PaperBench_record','https://proceedings.mlr.press/v267/starace25a.html')
+          ]
+          with sync_playwright() as p:
+            browser=p.chromium.launch()
+            context=browser.new_context(viewport={'width':1280,'height':1000},device_scale_factor=2)
+            for name,url in targets:
+              page=context.new_page(); info={'name':name,'requested_url':url}
+              try:
+                response=page.goto(url,wait_until='domcontentloaded',timeout=60000)
+                page.wait_for_timeout(3500)
+                info.update({'final_url':page.url,'http_status':response.status if response else None,'title':page.title(),'captured_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())})
+                page.screenshot(path=str(root/'captures'/f'{name}.png'))
+                (root/'captures'/f'{name}.html').write_text(page.content(),encoding='utf8')
+                (root/'captures'/f'{name}.txt').write_text(page.locator('body').inner_text(),encoding='utf8')
+                safeurl=page.url.replace('&','&amp;').replace('<','&lt;')
+                page.pdf(path=str(root/'captures'/f'{name}.pdf'),format='A4',landscape=True,print_background=True,display_header_footer=True,header_template='<div style="font:7px sans-serif;width:96%;margin:0 2%;overflow-wrap:anywhere">'+safeurl+'</div>',footer_template='<div style="font:7px sans-serif;width:96%;margin:0 2%"><span class="date"></span><span style="float:right" class="pageNumber"></span></div>',margin={'top':'0.35in','bottom':'0.3in','left':'0.3in','right':'0.3in'})
+              except Exception as e: info['error']=str(e)
+              (root/'captures'/f'{name}.json').write_text(json.dumps(info,indent=2))
+              page.close()
+            browser.close()
+          (root/'manifest.json').write_text(json.dumps(records,indent=2))
+          print(json.dumps(records,indent=2))
+          PY
+          python /tmp/capture.py
+      - name: Upload public source files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-source-capture
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
