@@ -1,0 +1,78 @@
+name: Public source final
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-source-final.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - name: Retrieve public documents
+        run: |
+          python -m pip install requests beautifulsoup4
+          mkdir -p out/papers out/metadata
+          cat >/tmp/get.py <<'PY'
+          import requests,json,re,concurrent.futures,hashlib
+          from pathlib import Path
+          from urllib.parse import urljoin
+          from bs4 import BeautifulSoup
+          out=Path('out')
+          def get(name,url):
+            try:
+              r=requests.get(url,timeout=12); r.raise_for_status()
+              if r.content.startswith(b'%PDF'):
+                (out/'papers'/(name+'.pdf')).write_bytes(r.content)
+                return dict(name=name,url=url,final_url=r.url,sha256=hashlib.sha256(r.content).hexdigest(),bytes=len(r.content)),r
+              return dict(name=name,url=url,final_url=r.url,status=r.status_code),r
+            except Exception as e:return dict(name=name,url=url,error=str(e)),None
+          first,_=get('iMedRAG','https://psb.stanford.edu/psb-online/proceedings/psb25/xiong.pdf')
+          records=[first]
+          def work(kv):
+            name,doi=kv;rows=[];urls=[]
+            for provider,url in [('crossref','https://api.crossref.org/works/'+doi),('openalex','https://api.openalex.org/works/https://doi.org/'+doi),('semanticscholar','https://api.semanticscholar.org/graph/v1/paper/DOI:'+doi+'?fields=title,openAccessPdf,url')]:
+              try:
+                r=requests.get(url,timeout=12);r.raise_for_status();j=r.json()
+                (out/'metadata'/(name+'_'+provider+'.json')).write_text(json.dumps(j,indent=2))
+                if provider=='crossref':
+                  j=j['message'];urls.extend(x['URL'] for x in j.get('link',[]) if x.get('URL'))
+                  u=j.get('resource',{}).get('primary',{}).get('URL')
+                  if u:urls.append(u)
+                elif provider=='openalex':
+                  for loc in j.get('locations',[]):
+                    if loc.get('pdf_url'):urls.append(loc['pdf_url'])
+                else:
+                  if (j.get('openAccessPdf') or {}).get('url'):urls.append(j['openAccessPdf']['url'])
+              except Exception as e: rows.append(dict(name=name,provider=provider,error=str(e)))
+            urls=list(dict.fromkeys(u.replace('http://','https://') for u in urls))
+            ids=[]
+            for u in urls:
+              m=re.search(r'(?:document/|arnumber=)(\d+)',u)
+              if m:ids.append(m.group(1))
+            for aid in set(ids):
+              urls.extend(['https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber='+aid,'https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber='+aid])
+            for u in urls[:7]:
+              row,r=get(name,u);rows.append(row)
+              if (out/'papers'/(name+'.pdf')).exists():break
+              if r is not None:
+                soup=BeautifulSoup(r.text,'html.parser')
+                for el in soup.select('iframe[src],meta[name="citation_pdf_url"]')[:3]:
+                  uu=urljoin(r.url,el.get('src') or el.get('content'))
+                  row,_=get(name,uu);rows.append(row)
+                  if (out/'papers'/(name+'.pdf')).exists():break
+            return rows
+          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+            for rows in ex.map(work,{'Precise_Fault_Location':'10.1109/TPWRD.2019.2954460','Voltage_Sag':'10.1109/ACCESS.2019.2953226','Optimal_Monitoring':'10.1109/CICED.2018.8592448'}.items()):records.extend(rows)
+          (out/'manifest.json').write_text(json.dumps(records,indent=2));print(json.dumps(records,indent=2))
+          PY
+          python /tmp/get.py
+      - name: Save sources
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-source-final
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
