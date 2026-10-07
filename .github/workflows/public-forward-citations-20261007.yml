@@ -1,0 +1,50 @@
+name: Public forward citations
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-forward-citations-20261007.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - name: Retrieve public records
+        run: |
+          pip -q install requests
+          mkdir -p out
+          cat >/tmp/collect.py <<'PY'
+          import requests,json,time
+          from pathlib import Path
+          from concurrent.futures import ThreadPoolExecutor
+          out=Path('out')
+          works={'AdaPlanner':'ARXIV:2305.16653','BBox_Adapter':'ARXIV:2402.08219','EC_DiT':'ARXIV:2410.02098','Voltage_Sag':'DOI:10.1109/ACCESS.2019.2953226','Fault_Location':'DOI:10.1109/TPWRD.2019.2954460'}
+          def collect(item):
+            name,pid=item;s=requests.Session();logs=[]
+            for suffix,params in [('',{'fields':'title,authors,year,venue,publicationVenue,publicationDate,citationCount,externalIds'}),('/citations',{'fields':'contexts,intents,isInfluential,title,authors,year,venue,publicationVenue,publicationDate,externalIds,openAccessPdf','limit':1000})]:
+              url='https://api.semanticscholar.org/graph/v1/paper/'+pid+suffix
+              try:
+                r=s.get(url,params=params,timeout=35);(out/(name+('_citations' if suffix else '_paper')+'.json')).write_text(r.text);logs.append({'url':r.url,'status':r.status_code})
+              except Exception as e:logs.append({'url':url,'error':str(e)})
+              time.sleep(2)
+            (out/(name+'_requests.json')).write_text(json.dumps(logs,indent=2))
+          with ThreadPoolExecutor(max_workers=2) as ex:list(ex.map(collect,works.items()))
+          queries=['AdaPlanner: Adaptive Planning from Feedback with Language Models','BBox-Adapter: Lightweight Adapting for Black-Box Large Language Models','EC-DIT: Scaling Diffusion Transformers with Adaptive Expert-Choice Routing','Two Birds with One Stone: Enhancing Uncertainty Quantification and Interpretability with Graph Functional Neural Process','Voltage Sag Source Identification Based on Few-Shot Learning']
+          for i,q in enumerate(queries):
+            try:
+              r=requests.get('https://api.openalex.org/works',params={'search':q,'per-page':3},timeout=25);(out/('oa_'+str(i)+'.json')).write_text(r.text)
+              if r.ok:
+                for j,w in enumerate(r.json().get('results',[])[:2]):
+                  rr=requests.get('https://api.openalex.org/works',params={'filter':'cites:'+w['id'].split('/')[-1],'per-page':200},timeout=35);(out/('oa_'+str(i)+'_citing_'+str(j)+'.json')).write_text(rr.text)
+            except Exception as e:(out/('oa_'+str(i)+'_error.txt')).write_text(str(e))
+          PY
+          python /tmp/collect.py
+      - name: Save sources
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-forward-citations-20261007
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
