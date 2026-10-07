@@ -1,0 +1,87 @@
+name: Public research expansion
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-research-expansion-20261007.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 9
+    steps:
+      - name: Setup
+        run: |
+          pip install requests beautifulsoup4 playwright
+          python -m playwright install --with-deps chromium
+      - name: Public sources
+        run: |
+          mkdir -p out
+          cat > /tmp/collect.py <<'PY'
+          import requests,json,re,hashlib,time,html
+          from pathlib import Path
+          from concurrent.futures import ThreadPoolExecutor
+          from urllib.parse import urljoin
+          from bs4 import BeautifulSoup
+          from playwright.sync_api import sync_playwright
+          root=Path('out');records=[]
+          papers={
+          'ToolEVO':['https://proceedings.iclr.cc/paper_files/paper/2025/file/d8d1d325f822e07d16866780cc23deb2-Paper-Conference.pdf'],
+          'CodeAct':['https://raw.githubusercontent.com/mlresearch/v235/main/assets/wang24h/wang24h.pdf'],
+          'CoALA':['https://openreview.net/pdf?id=1i6ZCvflQJ'],
+          'Arsoniadis':['https://doi.org/10.35833/MPCE.2023.000379','https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber=10396834','https://www.researchgate.net/publication/382589723_Fault_Location_Method_for_Overhead_Feeders_with_Distributed_Generation_Units_Based_on_Direct_Load_Flow_Approach/fulltext/66a3e843c6e41359a840396a/Fault-Location-Method-for-Overhead-Feeders-with-Distributed-Generation-Units-Based-on-Direct-Load-Flow-Approach.pdf']}
+          def getpaper(item):
+            name,urls=item;s=requests.Session();s.headers['User-Agent']='Mozilla/5.0';rec={'name':name,'attempts':[]};tried=set()
+            while urls and len(tried)<9:
+              url=urls.pop(0)
+              if url in tried:continue
+              tried.add(url)
+              try:
+                r=s.get(url,timeout=30);rec['attempts'].append({'url':url,'final_url':r.url,'status':r.status_code,'type':r.headers.get('Content-Type'),'bytes':len(r.content)})
+                if r.content[:4]==b'%PDF':
+                  (root/(name+'.pdf')).write_bytes(r.content);rec['saved']=name+'.pdf';rec['sha256']=hashlib.sha256(r.content).hexdigest();break
+                (root/(name+'_'+str(len(tried))+'.html')).write_text(r.text)
+                soup=BeautifulSoup(r.text,'html.parser')
+                for meta in soup.select('meta[name="citation_pdf_url"]'):
+                  if meta.get('content'):urls.insert(0,urljoin(r.url,meta['content']))
+                for a in soup.find_all(['a','iframe','embed']):
+                  href=a.get('href') or a.get('src') or ''
+                  if href and ('.pdf' in href.lower() or 'down_pdf' in href.lower() or 'getpdf' in href.lower()):
+                    u=urljoin(r.url,href)
+                    if u not in tried:urls.append(u)
+              except Exception as e:rec['attempts'].append({'url':url,'error':str(e)})
+            return rec
+          with ThreadPoolExecutor(max_workers=4) as ex:records=list(ex.map(getpaper,papers.items()))
+          (root/'downloads.json').write_text(json.dumps(records,indent=2))
+          targets=[
+          ('OneTwo_tutorial','https://github.com/google-deepmind/onetwo/blob/40d2484b2229e81fc889e9b1c802485d2f65e46d/colabs/tutorial.ipynb','The `PythonPlanningAgent`'),
+          ('ToolEVO_graph','https://github.com/Chen-GX/ToolEVO/blob/b7eebb4830740571091025432c8f03f5e42b9c2f/MCTS/src/tools/graph/graphtools.py','def check_neighbours'),
+          ('ToolQA_graph','https://github.com/night-chen/ToolQA/blob/main/benchmark/ReAct/code/tools/graph/graphtools.py','def check_neighbours')]
+          caps=[]
+          with sync_playwright() as p:
+            browser=p.chromium.launch();ctx=browser.new_context(viewport={'width':1440,'height':1000},device_scale_factor=2)
+            for name,url,needle in targets:
+              page=ctx.new_page();page.set_default_timeout(7000);rec={'name':name,'url':url,'capture_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+              try:
+                r=page.goto(url,wait_until='domcontentloaded',timeout=30000);page.wait_for_timeout(1500);rec['status']=r.status
+                (root/(name+'.html')).write_text(page.content());(root/(name+'.txt')).write_text(page.locator('body').inner_text())
+                page.screenshot(path=str(root/(name+'_top.png')),full_page=False)
+                try:
+                  loc=page.get_by_text(needle,exact=False).last;loc.scroll_into_view_if_needed(timeout=6000);page.evaluate('window.scrollBy(0,-240)');page.wait_for_timeout(400)
+                except Exception as e:rec['scroll_note']=str(e)
+                page.screenshot(path=str(root/(name+'_detail.png')),full_page=False)
+                page.pdf(path=str(root/(name+'.pdf')),format='A4',print_background=True,display_header_footer=True,header_template='<div style="font:8px sans-serif;width:94%;margin:0 3%;overflow-wrap:anywhere">'+html.escape(page.url)+'</div>',footer_template='<div style="font:8px sans-serif;width:94%;margin:0 3%"><span class="date"></span><span style="float:right" class="pageNumber"></span></div>',margin={'top':'0.65in','bottom':'0.45in','left':'0.35in','right':'0.35in'})
+              except Exception as e:rec['error']=str(e)
+              caps.append(rec);page.close()
+            browser.close()
+          (root/'captures.json').write_text(json.dumps(caps,indent=2));print(json.dumps(records,indent=2));print(json.dumps(caps,indent=2))
+          PY
+          python /tmp/collect.py
+      - name: Save public sources
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-research-expansion-20261007
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
