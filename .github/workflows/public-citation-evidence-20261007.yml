@@ -1,0 +1,81 @@
+name: Public citation evidence
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-citation-evidence-20261007.yml']
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Install browser
+        run: |
+          pip install playwright requests
+          python -m playwright install --with-deps chromium
+      - name: Capture public sources
+        run: |
+          mkdir -p out
+          cat > /tmp/capture.py <<'PY'
+          from playwright.sync_api import sync_playwright
+          from pathlib import Path
+          import json,time,html,requests,hashlib
+          out=Path('out'); manifest=[]
+          targets=[
+          ('OneTwo_code','https://github.com/google-deepmind/onetwo/blob/40d2484b2229e81fc889e9b1c802485d2f65e46d/onetwo/agents/python_planning.py','Inspired by various research'),
+          ('OneTwo_history','https://github.com/google-deepmind/onetwo/commit/40d2484b2229e81fc889e9b1c802485d2f65e46d',None),
+          ('RetrievalQA_readme','https://github.com/hyintell/RetrievalQA/blob/f26134cb167f420a657684665f597964aadabd3c/README.md','The agenda corpus'),
+          ('RetrievalQA_credit','https://github.com/hyintell/RetrievalQA/blob/f26134cb167f420a657684665f597964aadabd3c/README.md','Our data and code are based'),
+          ('ToolEVO_readme','https://github.com/Chen-GX/ToolEVO/blob/b7eebb4830740571091025432c8f03f5e42b9c2f/README.md','The external corpus can be downloaded'),
+          ('ToolEVO_credit','https://github.com/Chen-GX/ToolEVO/blob/b7eebb4830740571091025432c8f03f5e42b9c2f/README.md','Special thanks to'),
+          ('ToolEVO_server','https://github.com/Chen-GX/ToolEVO/blob/b7eebb4830740571091025432c8f03f5e42b9c2f/MCTS/src/toolqa_api_serve.py','from tool_online import ToolQA_OnLine'),
+          ('ToolEVO_tools','https://github.com/Chen-GX/ToolEVO/blob/b7eebb4830740571091025432c8f03f5e42b9c2f/MCTS/src/tool_online.py','from tools'),
+          ]
+          with sync_playwright() as p:
+            browser=p.chromium.launch()
+            ctx=browser.new_context(viewport={'width':1440,'height':1000},device_scale_factor=2)
+            for name,url,needle in targets:
+              page=ctx.new_page();page.set_default_timeout(12000)
+              rec={'name':name,'url':url,'capture_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+              try:
+                response=page.goto(url,wait_until='domcontentloaded',timeout=40000)
+                page.wait_for_timeout(1600)
+                rec['status']=response.status;rec['final_url']=page.url
+                (out/(name+'.html')).write_text(page.content())
+                (out/(name+'.txt')).write_text(page.locator('body').inner_text())
+                page.screenshot(path=str(out/(name+'_top.png')),full_page=False)
+                if needle:
+                  try:
+                    loc=page.get_by_text(needle,exact=False).last
+                    loc.scroll_into_view_if_needed(timeout=5000)
+                    page.evaluate('window.scrollBy(0,-230)')
+                    page.wait_for_timeout(300)
+                  except Exception as e:rec['scroll_note']=str(e)
+                page.screenshot(path=str(out/(name+'_detail.png')),full_page=False)
+                # Retain the complete live webpage in a browser print as well.
+                page.pdf(path=str(out/(name+'.pdf')),format='A4',print_background=True,display_header_footer=True,header_template='<div style="font:8px sans-serif;width:94%;margin:0 3%;overflow-wrap:anywhere">'+html.escape(page.url)+'</div>',footer_template='<div style="font:8px sans-serif;width:94%;margin:0 3%"><span class="date"></span><span style="float:right" class="pageNumber"></span></div>',margin={'top':'0.65in','bottom':'0.45in','left':'0.35in','right':'0.35in'})
+              except Exception as e:rec['error']=str(e)
+              manifest.append(rec);page.close()
+            # Browser prints of the source endpoints preserve long lines by wrapping.
+            for name,url in [('OneTwo_raw','https://raw.githubusercontent.com/google-deepmind/onetwo/40d2484b2229e81fc889e9b1c802485d2f65e46d/onetwo/agents/python_planning.py'),('ToolEVO_raw','https://raw.githubusercontent.com/Chen-GX/ToolEVO/b7eebb4830740571091025432c8f03f5e42b9c2f/MCTS/src/tool_online.py')]:
+              pg=ctx.new_page();rec={'name':name,'url':url}
+              try:
+                r=pg.goto(url,wait_until='domcontentloaded',timeout=30000);rec['status']=r.status
+                pg.add_style_tag(content='pre {white-space:pre-wrap !important;overflow-wrap:anywhere !important;font:10px monospace !important;}')
+                (out/(name+'.txt')).write_text(pg.locator('body').inner_text())
+                pg.pdf(path=str(out/(name+'.pdf')),format='A4',print_background=True,display_header_footer=True,header_template='<div style="font:8px sans-serif;width:94%;margin:0 3%;overflow-wrap:anywhere">'+html.escape(pg.url)+'</div>',footer_template='<div style="font:8px sans-serif;width:94%;margin:0 3%"><span class="date"></span><span style="float:right" class="pageNumber"></span></div>',margin={'top':'0.65in','bottom':'0.4in','left':'0.4in','right':'0.4in'})
+              except Exception as e:rec['error']=str(e)
+              manifest.append(rec);pg.close()
+            browser.close()
+          (out/'manifest.json').write_text(json.dumps(manifest,indent=2));print(json.dumps(manifest,indent=2))
+          PY
+          python /tmp/capture.py
+      - name: Save public captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-citation-evidence-20261007
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
