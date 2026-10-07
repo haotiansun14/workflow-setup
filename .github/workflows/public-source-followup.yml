@@ -1,0 +1,110 @@
+name: Public source followup
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-source-followup.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Install tools
+        run: |
+          python -m pip install requests beautifulsoup4 playwright pymupdf
+          python -m playwright install --with-deps chromium
+      - name: Collect sources
+        run: |
+          mkdir -p out/papers out/captures out/metadata
+          cat >/tmp/collect.py <<'PY'
+          import requests,json,hashlib,re,time
+          from pathlib import Path
+          from urllib.parse import urljoin
+          from bs4 import BeautifulSoup
+          from playwright.sync_api import sync_playwright
+          out=Path('out');s=requests.Session(); rec=[]
+          def fetchpdf(name,url):
+            try:
+              r=s.get(url,timeout=45);r.raise_for_status()
+              if not r.content.startswith(b'%PDF'): return None,r
+              p=out/'papers'/(name+'.pdf');p.write_bytes(r.content)
+              rec.append(dict(name=name,url=url,final_url=r.url,bytes=len(r.content),sha256=hashlib.sha256(r.content).hexdigest()))
+              return p,r
+            except Exception as e:
+              rec.append(dict(name=name,url=url,error=str(e)));return None,None
+          for n,u in {'GraphARM':'https://proceedings.mlr.press/v202/kong23b/kong23b.pdf','GraphFNP':'https://proceedings.mlr.press/v238/kong24a/kong24a.pdf'}.items():fetchpdf(n,u)
+          dois={'Precise_Fault_Location':'10.1109/TPWRD.2019.2954460','Voltage_Sag':'10.1109/ACCESS.2019.2953226','Optimal_Monitoring':'10.1109/CICED.2018.8592448'}
+          ieee_pages={}
+          for name,doi in dois.items():
+            candidates=[]
+            try:
+              r=s.get('https://api.crossref.org/works/'+doi,timeout=30);r.raise_for_status();j=r.json()['message']
+              (out/'metadata'/(name+'_crossref.json')).write_text(json.dumps(j,indent=2))
+              candidates.extend(x['URL'] for x in j.get('link',[]) if x.get('URL'))
+              primary=j.get('resource',{}).get('primary',{}).get('URL')
+              if primary:candidates.append(primary);ieee_pages[name]=primary
+            except Exception as e:rec.append(dict(name=name,error='crossref '+str(e)))
+            candidates.append('https://doi.org/'+doi)
+            found=False
+            for url in list(dict.fromkeys(candidates)):
+              p,r=fetchpdf(name,url)
+              if p:found=True;break
+              if r is not None:
+                (out/'metadata'/(name+'_landing.html')).write_text(r.text)
+                m=re.search(r'(?:document/|arnumber=)(\d+)',r.url)
+                if m:
+                  aid=m.group(1);ieee_pages[name]='https://ieeexplore.ieee.org/document/'+aid
+                  for pu in ['https://ieeexplore.ieee.org/stampPDF/getPDF.jsp?tp=&arnumber='+aid,'https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber='+aid]:
+                    p,r2=fetchpdf(name,pu)
+                    if p:found=True;break
+                    if r2 is not None:
+                      soup=BeautifulSoup(r2.text,'html.parser')
+                      for el in soup.select('iframe[src],meta[name="citation_pdf_url"]'):
+                        link=el.get('src') or el.get('content')
+                        if link:
+                          p,_=fetchpdf(name,urljoin(r2.url,link))
+                          if p:found=True;break
+                    if found:break
+              if found:break
+          targets={
+            'D09_BBox_source_raw':'https://raw.githubusercontent.com/haotiansun14/BBox-Adapter/bea3065af2cc456ea079cb2cef7ad18859cf5667/algo/beam_search.py',
+            'D10_PaperBench_rubric_raw':'https://raw.githubusercontent.com/openai/frontier-evals/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/rubric.json',
+            'D11_PaperBench_blacklist_raw':'https://raw.githubusercontent.com/openai/frontier-evals/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/blacklist.txt'
+          }
+          with sync_playwright() as p:
+            b=p.chromium.launch();c=b.new_context(viewport={'width':1600,'height':1100},device_scale_factor=2)
+            for name,url in targets.items():
+              pg=c.new_page()
+              try:
+                response=pg.goto(url,wait_until='domcontentloaded',timeout=60000)
+                pg.add_style_tag(content='@media print { pre {white-space: pre-wrap !important; overflow-wrap: anywhere !important; font: 9px monospace !important; } }')
+                safeurl=pg.url.replace('&','&amp;')
+                pg.pdf(path=str(out/'captures'/(name+'.pdf')),format='A4',print_background=True,display_header_footer=True,header_template='<div style="font:8px sans-serif;width:94%;margin:0 3%;overflow-wrap:anywhere">'+safeurl+'</div>',footer_template='<div style="font:8px sans-serif;width:94%;margin:0 3%"><span class="date"></span><span style="float:right" class="pageNumber"></span></div>',margin={'top':'0.65in','bottom':'0.4in','left':'0.35in','right':'0.35in'})
+                (out/'captures'/(name+'.json')).write_text(json.dumps(dict(url=pg.url,status=response.status,captured_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())),indent=2))
+              except Exception as e:rec.append(dict(name=name,url=url,error=str(e)))
+              pg.close()
+            for name,url in ieee_pages.items():
+              pg=c.new_page()
+              try:
+                response=pg.goto(url,wait_until='domcontentloaded',timeout=45000);pg.wait_for_timeout(3000)
+                (out/'metadata'/(name+'_browser.html')).write_text(pg.content())
+                (out/'metadata'/(name+'_browser.txt')).write_text(pg.locator('body').inner_text())
+                rec.append(dict(name=name,browser_url=pg.url,status=response.status))
+                for el in pg.locator('meta[name="citation_pdf_url"]').all():
+                  u=el.get_attribute('content')
+                  if u:fetchpdf(name,u)
+              except Exception as e:rec.append(dict(name=name,error='browser '+str(e)))
+              pg.close()
+            b.close()
+          (out/'manifest.json').write_text(json.dumps(rec,indent=2));print(json.dumps(rec,indent=2))
+          PY
+          python /tmp/collect.py
+      - name: Save sources
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-source-followup
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
