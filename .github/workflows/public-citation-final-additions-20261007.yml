@@ -1,0 +1,49 @@
+name: Published planning articles
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-citation-final-additions-20261007.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Download publisher PDFs
+        run: |
+          python -m pip -q install requests
+          mkdir -p out
+          cat >/tmp/get_articles.py <<'PY'
+          import requests, json, hashlib
+          from pathlib import Path
+          from concurrent.futures import ThreadPoolExecutor
+          out=Path('out')
+          sources={
+            'AutoManual':'https://proceedings.neurips.cc/paper_files/paper/2024/file/0142921fad7ef9192bd87229cdafa9d4-Paper-Conference.pdf',
+            'Communication_Policies':'https://aclanthology.org/2024.splurobonlp-1.2.pdf',
+            'Tool_Planner':'https://proceedings.iclr.cc/paper_files/paper/2025/file/7f605d59a0dbde101518b552cb616ddf-Paper-Conference.pdf'
+          }
+          def get(item):
+            name,url=item
+            rec={'name':name,'source_url':url}
+            try:
+              r=requests.get(url,timeout=50);r.raise_for_status()
+              if not r.content.startswith(b'%PDF'):raise ValueError('Response is not a PDF')
+              (out/(name+'.pdf')).write_bytes(r.content)
+              rec.update(final_url=r.url,size=len(r.content),sha256=hashlib.sha256(r.content).hexdigest())
+            except Exception as e:rec['error']=str(e)
+            return rec
+          with ThreadPoolExecutor(max_workers=3) as ex:results=list(ex.map(get,sources.items()))
+          (out/'source_manifest.json').write_text(json.dumps(results,indent=2))
+          print(json.dumps(results,indent=2))
+          PY
+          python /tmp/get_articles.py
+      - name: Save published sources
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: published-planning-articles
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
