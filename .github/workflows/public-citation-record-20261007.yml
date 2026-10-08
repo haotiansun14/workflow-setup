@@ -1,0 +1,82 @@
+name: Public citation record
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-citation-record-20261007.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    steps:
+      - name: Install tools
+        run: |
+          pip install requests beautifulsoup4 playwright
+          python -m playwright install --with-deps chromium
+      - name: Capture public sources
+        run: |
+          mkdir -p out/scholar out/metadata
+          cat > /tmp/collect.py <<'PY'
+          import json,time,html,requests,hashlib
+          from pathlib import Path
+          from urllib.parse import urljoin, urlencode
+          from playwright.sync_api import sync_playwright
+          root=Path('out'); log=[]; profile='https://scholar.google.com/citations?user=lcWkVCQAAAAJ&hl=en&pagesize=100'
+          def record(x):
+            log.append(x);(root/'capture_log.json').write_text(json.dumps(log,indent=2))
+          with sync_playwright() as p:
+            b=p.chromium.launch();ctx=b.new_context(viewport={'width':1440,'height':1050},device_scale_factor=1)
+            page=ctx.new_page();page.set_default_timeout(10000)
+            def visit(url,name):
+              rec={'name':name,'requested_url':url,'retrieved_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+              try:
+                r=page.goto(url,wait_until='domcontentloaded',timeout=35000);page.wait_for_timeout(1200)
+                rec.update(status=r.status if r else None,final_url=page.url,title=page.title())
+                text=page.locator('body').inner_text();(root/'scholar'/f'{name}.html').write_text(page.content());(root/'scholar'/f'{name}.txt').write_text(text)
+                page.screenshot(path=str(root/'scholar'/f'{name}.png'),full_page=True)
+                rec['blocked']=bool(r and r.status in (403,429)) or '/sorry/' in page.url or 'unusual traffic' in text.lower() or 'not a robot' in text.lower()
+                if not rec['blocked']:
+                  page.pdf(path=str(root/'scholar'/f'{name}.pdf'),format='A4',print_background=True,display_header_footer=True,header_template='<div style="font:8px sans-serif;width:94%;margin:0 3%;overflow-wrap:anywhere">'+html.escape(page.url)+'</div>',footer_template='<div style="font:8px sans-serif;width:94%;margin:0 3%"><span class="date"></span><span style="float:right" class="pageNumber"></span></div>',margin={'top':'0.8in','bottom':'0.5in','left':'0.35in','right':'0.35in'})
+                record(rec);return not rec['blocked']
+              except Exception as e:rec['error']=str(e);record(rec);return False
+            if visit(profile,'profile'):
+              rows=page.locator('tr.gsc_a_tr').evaluate_all('(rows)=>rows.map(r=>({title:r.querySelector(".gsc_a_at")?.innerText,detail:r.querySelector(".gsc_a_at")?.href,cited_by:r.querySelector(".gsc_a_ac")?.href,count:r.querySelector(".gsc_a_ac")?.innerText,year:r.querySelector(".gsc_a_y")?.innerText,authors:r.querySelector(".gs_gray")?.innerText}))')
+              (root/'scholar'/'profile_rows.json').write_text(json.dumps(rows,indent=2));end=time.time()+540;pagecount=0;blocked=False
+              for pi,row in enumerate(rows):
+                if not row.get('cited_by') or not row.get('count'):continue
+                url=row['cited_by'];idx=0
+                while url and time.time()<end and pagecount<100:
+                  time.sleep(5)
+                  name=f'paper_{pi+1:02d}_list_{idx+1:03d}'
+                  if not visit(url,name):blocked=True;break
+                  items=page.locator('.gs_r.gs_or.gs_scl').evaluate_all('(rows)=>rows.map(r=>({title:r.querySelector(".gs_rt")?.innerText,title_url:r.querySelector(".gs_rt a")?.href,author_line:r.querySelector(".gs_a")?.innerText,text:r.innerText,html:r.outerHTML}))')
+                  (root/'scholar'/f'{name}_rows.json').write_text(json.dumps({'cited_work':row,'url':page.url,'items':items},indent=2))
+                  links=page.locator('a').evaluate_all('(as)=>as.filter(a=>a.innerText.trim()==="Next").map(a=>a.href)')
+                  url=links[0] if links else None;idx+=1;pagecount+=1
+                if blocked or time.time()>=end or pagecount>=100:break
+              record({'scholar_citation_pages':pagecount,'stopped_on_block':blocked,'bounded_capture':True})
+            b.close()
+          seeds={'AdaPlanner':'ARXIV:2305.16653','BBox-Adapter':'ARXIV:2402.08219','ToolQA':'ARXIV:2306.13304','EC-DiT':'ARXIV:2410.02098','PreciseFaultLocation':'DOI:10.1109/TPWRD.2019.2954460','VoltageSag':'DOI:10.1109/ACCESS.2019.2953226'}
+          ses=requests.Session();ses.headers['User-Agent']='PublicAcademicRecordReview/1.0'
+          for name,pid in seeds.items():
+            for kind in ['paper','citations']:
+              time.sleep(3)
+              path=f'https://api.semanticscholar.org/graph/v1/paper/{pid}'
+              fields='title,authors,year,publicationDate,externalIds,venue,publicationVenue'
+              if kind=='citations':path+='/citations';params={'fields':fields+',contexts,intents','limit':1000}
+              else:params={'fields':fields+',citationCount'}
+              try:
+                r=ses.get(path,params=params,timeout=40);(root/'metadata'/f'{name}_{kind}.json').write_text(r.text)
+                record({'source':name,'kind':kind,'url':r.url,'status':r.status_code,'retrieved_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())})
+              except Exception as e:record({'source':name,'kind':kind,'error':str(e)})
+          PY
+          python /tmp/collect.py
+      - name: Save public evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-citation-record-20261007
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
