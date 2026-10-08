@@ -1,0 +1,74 @@
+name: Public citation metadata supplement
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-citation-record-supplement-20261007.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Setup
+        run: pip install requests
+      - name: Public metadata
+        run: |
+          mkdir -p out
+          cat > /tmp/collect.py <<'PY'
+          import requests,json,time,re,unicodedata
+          from pathlib import Path
+          root=Path('out');log=[];s=requests.Session();s.headers['User-Agent']='AcademicCitationAudit/1.0'
+          fields='title,authors,year,publicationDate,externalIds,venue,publicationVenue,citationCount'
+          seeds=[
+          ('HYDRA',None,'HYDRA: Model Factorization Framework for Black-Box LLM Personalization'),
+          ('GraphARM',None,'Autoregressive Diffusion Model for Graph Generation'),
+          ('GraphFNP',None,'Two Birds with One Stone: Enhancing Uncertainty Quantification and Interpretability with Graph Functional Neural Process'),
+          ('MedAdapter','DOI:10.18653/v1/2024.emnlp-main.1244','MedAdapter: Efficient Test-Time Adaptation of Large Language Models Towards Medical Reasoning'),
+          ('Matryoshka','ARXIV:2410.20749','Matryoshka Pilot: Learning to Drive Black-Box LLMs with LLMs'),
+          ('Spectral','ARXIV:2407.10448','Spectral Representation for Causal Estimation with Hidden Confounders'),
+          ('AmorLIP','ARXIV:2505.18983','AmorLIP: Efficient Language-Image Pretraining via Amortization'),
+          ('InFIR','ARXIV:2505.21439','Towards Better Instruction Following Retrieval Models'),
+          ('ComprehensivePower','DOI:10.1109/IPEMC-ECCEAsia48364.2020.9367956','Comprehensive Evaluation of Multiple Power Qualities in Distributed Network Based on AHP and Optimal Membership'),
+          ('SagLocating','DOI:10.1109/PEAC.2018.8590486','A Voltage Sag Source Locating Method with Multiple Screening Criterions Considering Voltage Measurement Errors'),
+          ('IGBT',None,'An Integrated Voltage and Current Balancing Strategy of Series-Parallel Connected IGBTs'),
+          ('OptimalMonitoring',None,'Optimal monitoring allocation by considering voltage sags locating and disturbance tolerance'),
+          ('BBox-Adapter','ARXIV:2402.08219','BBox-Adapter: Lightweight Adapting for Black-Box Large Language Models'),
+          ('EC-DiT','ARXIV:2410.02098','EC-DIT: Scaling Diffusion Transformers with Adaptive Expert-Choice Routing')]
+          def get(url,params,name):
+            time.sleep(5)
+            try:
+              r=s.get(url,params=params,timeout=35);(root/(name+'.json')).write_text(r.text)
+              log.append({'name':name,'url':r.url,'status':r.status_code,'retrieved_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())});(root/'log.json').write_text(json.dumps(log,indent=2))
+              return r.json() if r.status_code==200 else {}
+            except Exception as e:log.append({'name':name,'error':str(e)});return {}
+          def norm(t):return re.sub('[^a-z0-9]','',unicodedata.normalize('NFKD',t).lower())
+          resolved=[]
+          for name,pid,title in seeds:
+            if not pid:
+              d=get('https://api.semanticscholar.org/graph/v1/paper/search',{'query':title,'limit':5,'fields':fields},name+'_search')
+              matches=[x for x in d.get('data',[]) if norm(x.get('title',''))==norm(title) and any(norm(a.get('name','')) in ('haotiansun','sunhaotian','hsun') for a in x.get('authors',[]))]
+              if not matches:continue
+              for mi,item in enumerate(matches):
+                label=name if mi==0 else name+'_variant'+str(mi+1);(root/(label+'_paper.json')).write_text(json.dumps(item,indent=2));resolved.append((label,item['paperId'],title))
+            else:
+              item=get('https://api.semanticscholar.org/graph/v1/paper/'+pid,{'fields':fields},name+'_paper')
+              if item.get('paperId'):resolved.append((name,item['paperId'],title))
+          (root/'resolved.json').write_text(json.dumps(resolved,indent=2))
+          for name,pid,title in resolved:
+            if name in ('BBox-Adapter','EC-DiT'):continue
+            offset=0
+            for part in range(3):
+              d=get('https://api.semanticscholar.org/graph/v1/paper/'+pid+'/citations',{'fields':'title,authors,year,publicationDate,externalIds,venue,publicationVenue,contexts,intents','limit':1000,'offset':offset},name+'_citations_'+str(part))
+              if 'next' not in d:break
+              offset=d['next']
+          (root/'log.json').write_text(json.dumps(log,indent=2))
+          PY
+          python /tmp/collect.py
+      - name: Save public metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-citation-metadata-supplement-20261007
+          path: out/
+          retention-days: 7
