@@ -1,0 +1,67 @@
+name: Public software screenshots
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-software-screenshots-20261007.yml']
+permissions:
+  contents: read
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    steps:
+      - name: Install browser tools
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Capture public screenshots
+        run: |
+          mkdir -p out
+          cat > /tmp/shots.py <<'PY'
+          import json,time,re
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          out=Path('out');log=[]
+          targets=[
+          ('onetwo','https://raw.githubusercontent.com/google-deepmind/onetwo/40d2484b2229e81fc889e9b1c802485d2f65e46d/onetwo/agents/python_planning.py','Implementation of a Python Planning', [('In the Python Planning strategy,','execution results.'),('Inspired by various research','(https://arxiv.org/pdf/2305.16653.pdf)')],False),
+          ('toolevo_readme','https://raw.githubusercontent.com/Chen-GX/ToolEVO/b7eebb4830740571091025432c8f03f5e42b9c2f/README.md','## Benchmark (ToolQA-D)',[('* The external corpus','/ToolQA-D/data/external_corpus/`.')],False),
+          ('toolevo_tools','https://raw.githubusercontent.com/Chen-GX/ToolEVO/b7eebb4830740571091025432c8f03f5e42b9c2f/MCTS/src/tool_online.py','from tools.text.agenda_retriever',[('from tools.text.agenda_retriever','from tools.graph.graphtools import graph_toolkits'),('self.init_agenda_retriever(args)','print("init graph success")')],False),
+          ('paperbench_task','https://raw.githubusercontent.com/openai/frontier-evals/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/rubric.json','"id": "root"',[('"requirements": "The BBOX-ADAPTER','completely."'),('"requirements": "Algorithm 1','correctly."')],False),
+          ('adaplanner_dbms','https://github.com/haotiansun14/AdaPlanner/issues/4','DBMS',[],True),
+          ('icml_bbox','https://icml.cc/virtual/2024/poster/33293','Spotlight Poster',[],True)
+          ]
+          with sync_playwright() as p:
+            b=p.chromium.launch();ctx=b.new_context(viewport={'width':1150,'height':1050},device_scale_factor=1)
+            for name,url,needle,spans,full in targets:
+              page=ctx.new_page();page.set_default_timeout(6000)
+              rec={'name':name,'requested_url':url,'captured_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+              try:
+                resp=page.goto(url,wait_until='domcontentloaded',timeout=30000);page.wait_for_timeout(1200)
+                txt=page.locator('body').inner_text();rec.update(status=resp.status if resp else None,final_url=page.url,title=page.title(),required_text_present=needle in txt)
+                (out/f'{name}.txt').write_text(txt);(out/f'{name}.html').write_text(page.content())
+                if rec['status'] in [401,403,429] or not rec['required_text_present']:
+                  rec['saved']=False;log.append(rec);(out/'capture_log.json').write_text(json.dumps(log,indent=2));page.close();continue
+                if full:
+                  page.screenshot(path=str(out/f'{name}_full.png'),full_page=True,timeout=15000)
+                else:
+                  page.evaluate('''needle => {const w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);let n;while(n=w.nextNode()){const i=n.textContent.indexOf(needle);if(i>=0){const r=document.createRange();r.setStart(n,i);r.setEnd(n,i+needle.length);window.scrollTo(0,Math.max(0,window.scrollY+r.getBoundingClientRect().top-55));return true;}}return false;}''',needle)
+                page.wait_for_timeout(300)
+                page.screenshot(path=str(out/f'{name}_viewport.png'),timeout=15000)
+                rec['viewport']={'width':1150,'height':1050};rec['scroll']=page.evaluate('({x:scrollX,y:scrollY})')
+                rects=page.evaluate('''spans=>{let res=[];const w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);let n;while(n=w.nextNode()){for(const [start,end] of spans){let a=n.textContent.indexOf(start);if(a<0)continue;let z=n.textContent.indexOf(end,a);if(z<0)continue;let r=document.createRange();r.setStart(n,a);r.setEnd(n,z+end.length);res.push({start,end,rects:[...r.getClientRects()].map(q=>({x:q.x,y:q.y,width:q.width,height:q.height}))});}}return res;}''',spans)
+                rec['highlight_spans']=rects;rec['saved']=True
+              except Exception as e:rec['error']=str(e)
+              finally:
+                log.append(rec);(out/'capture_log.json').write_text(json.dumps(log,indent=2));page.close()
+              time.sleep(1)
+            b.close()
+          PY
+          python /tmp/shots.py
+      - name: Save public captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-software-screenshots-20261007
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
