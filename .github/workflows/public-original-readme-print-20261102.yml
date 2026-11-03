@@ -1,0 +1,42 @@
+name: Original README source printout
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-original-readme-print-20261102.yml']
+permissions:
+  contents: read
+jobs:
+  print:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    steps:
+      - name: Install browser
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+      - name: Print source
+        run: |
+          mkdir -p out
+          python - <<'PY'
+          import json,time,hashlib
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          url='https://raw.githubusercontent.com/hyintell/RetrievalQA/f26134cb167f420a657684665f597964aadabd3c/README.md'
+          with sync_playwright() as p:
+            b=p.chromium.launch()
+            page=b.new_page(viewport={'width':1450,'height':1000})
+            response=page.goto(url,wait_until='domcontentloaded',timeout=45000)
+            text=page.locator('body').inner_text()
+            assert response.status==200 and 'retriever provided by ToolQA' in text
+            Path('out/13_RetrievalQA_README_raw.txt').write_text(text)
+            Path('out/13_RetrievalQA_README_raw.html').write_text(page.content())
+            page.pdf(path='out/13_RetrievalQA_README_raw.pdf',format='A4',landscape=True,print_background=True,display_header_footer=True,margin={'top':'16mm','bottom':'16mm','left':'10mm','right':'10mm'},scale=0.8)
+            record={'name':'13_RetrievalQA_README_raw','requested_url':url,'final_url':page.url,'status':response.status,'captured_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'sha256':hashlib.sha256(Path('out/13_RetrievalQA_README_raw.pdf').read_bytes()).hexdigest(),'needle_present':True}
+            Path('out/capture_log.json').write_text(json.dumps([record],indent=2))
+            b.close()
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-original-readme-print-20261102
+          path: out/
+          retention-days: 7
