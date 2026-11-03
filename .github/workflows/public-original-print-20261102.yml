@@ -1,0 +1,73 @@
+name: Original public source page printouts
+on:
+  push:
+    branches: [public-source-capture-20261006]
+    paths: ['.github/workflows/public-original-print-20261102.yml']
+permissions:
+  contents: read
+jobs:
+  print-public-pages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Install browser
+        run: |
+          pip install playwright requests
+          python -m playwright install --with-deps chromium
+      - name: Print original pages
+        run: |
+          mkdir -p out
+          cat > /tmp/print_original.py <<'PY'
+          import json,time,hashlib
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+          out=Path('out'); records=[]
+          targets=[
+           ('01_AdaPlanner_release','https://github.com/haotiansun14/AdaPlanner/commit/f5b9b44fd57d169eec9bdc759ec78d405d4b76c3','add code'),
+           ('02_BBox_release','https://github.com/haotiansun14/BBox-Adapter/commit/bea3065af2cc456ea079cb2cef7ad18859cf5667','first release'),
+           ('03_OneTwo','https://github.com/google-deepmind/onetwo/blob/40d2484b2229e81fc889e9b1c802485d2f65e46d/onetwo/agents/python_planning.py','AdaPlanner'),
+           ('04_RetrievalQA','https://github.com/hyintell/RetrievalQA/blob/f26134cb167f420a657684665f597964aadabd3c/README.md','retriever provided by ToolQA'),
+           ('05_ToolEVO_README','https://github.com/Chen-GX/ToolEVO/blob/b7eebb4830740571091025432c8f03f5e42b9c2f/README.md','external corpus'),
+           ('06_ToolEVO_tools','https://github.com/Chen-GX/ToolEVO/blob/b7eebb4830740571091025432c8f03f5e42b9c2f/MCTS/src/tool_online.py','init_agenda_retriever'),
+           ('07_PaperBench_rubric','https://github.com/openai/frontier-evals/blob/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/rubric.json','BBOX-ADAPTER'),
+           ('08_ICML_Spotlight','https://icml.cc/virtual/2024/poster/33293','BBox-Adapter'),
+           ('09_OneTwo_raw','https://raw.githubusercontent.com/google-deepmind/onetwo/40d2484b2229e81fc889e9b1c802485d2f65e46d/onetwo/agents/python_planning.py','AdaPlanner'),
+           ('10_ToolEVO_README_raw','https://raw.githubusercontent.com/Chen-GX/ToolEVO/b7eebb4830740571091025432c8f03f5e42b9c2f/README.md','external corpus'),
+           ('11_ToolEVO_tools_raw','https://raw.githubusercontent.com/Chen-GX/ToolEVO/b7eebb4830740571091025432c8f03f5e42b9c2f/MCTS/src/tool_online.py','init_agenda_retriever'),
+           ('12_PaperBench_rubric_raw','https://raw.githubusercontent.com/openai/frontier-evals/f20fa7b2d5084557d6299ce5ea8458ce8fca95cb/project/paperbench/data/papers/bbox/rubric.json','BBOX-ADAPTER')
+          ]
+          with sync_playwright() as p:
+            browser=p.chromium.launch()
+            context=browser.new_context(viewport={'width':1450,'height':1000},locale='en-US')
+            for name,url,needle in targets:
+              page=context.new_page(); rec={'name':name,'requested_url':url,'captured_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+              try:
+                response=page.goto(url,wait_until='domcontentloaded',timeout=45000)
+                page.wait_for_timeout(1800)
+                text=page.locator('body').inner_text(timeout=10000)
+                rec.update(status=response.status if response else None,final_url=page.url,title=page.title(),needle_present=needle.lower() in text.lower())
+                (out/(name+'.html')).write_text(page.content(),encoding='utf-8')
+                (out/(name+'.txt')).write_text(text,encoding='utf-8')
+                if rec['status'] != 200 or not rec['needle_present']:
+                  raise RuntimeError('Source content not verified')
+                # No inserted captions, highlights, replacements, or page-style changes.
+                # Chromium generates the original-page title, date and URL headers/footers.
+                page.pdf(path=str(out/(name+'.pdf')),format='A4',landscape=True,print_background=True,display_header_footer=True,margin={'top':'16mm','bottom':'16mm','left':'10mm','right':'10mm'},scale=0.8)
+                page.screenshot(path=str(out/(name+'.png')),full_page=False)
+                rec['sha256']=hashlib.sha256((out/(name+'.pdf')).read_bytes()).hexdigest()
+              except Exception as error:
+                rec['error']=str(error)
+              records.append(rec)
+              (out/'capture_log.json').write_text(json.dumps(records,indent=2))
+              page.close();time.sleep(1)
+            browser.close()
+          PY
+          python /tmp/print_original.py
+      - name: Save original printouts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-original-print-20261102
+          path: out/
+          retention-days: 7
+          if-no-files-found: error
